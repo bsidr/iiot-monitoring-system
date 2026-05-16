@@ -1,0 +1,202 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+
+// -------------------- WiFi --------------------
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+// -------------------- MQTT --------------------
+const char* mqtt_server = "test.mosquitto.org";
+
+const char* topic_auto    = "projektESP32/temperature/auto";
+const char* topic_manual  = "projektESP32/temperature/manual";
+const char* topic_led     = "projektESP32/cmd";
+const char* topic_request = "projektESP32/request";
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// -------------------- GPIO --------------------
+#define LED_PIN 2
+
+
+// -------------------- TIMING --------------------
+unsigned long lastHTTP = 0;
+const unsigned long AUTO_INTERVAL = 5000;
+
+// -------------------- FLAGS --------------------
+volatile bool manualRequest = false;
+volatile bool requestArmed = true;
+// -------------------- WIFI SETUP --------------------
+void setupWiFi() {
+  Serial.print("Łączenie z WiFi: ");
+  Serial.println(ssid);
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\nPołączono z WiFi");
+  Serial.print("IP: ");
+  Serial.println(WiFi.localIP());
+}
+
+// -------------------- FETCH + PUBLISH --------------------
+void fetchAndPublishTemperature(const char* topic) {
+
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(
+    "https://api.open-meteo.com/v1/forecast?latitude=50.0614&longitude=19.9366&current_weather=true"
+  );
+
+  int httpCode = http.GET();
+
+  if (httpCode > 0) {
+    StaticJsonDocument<1024> doc;
+    DeserializationError error = deserializeJson(doc, http.getString());
+
+    if (!error) {
+      float temperature = doc["current_weather"]["temperature"];
+
+      Serial.print("Temperature: ");
+      Serial.println(temperature);
+
+      StaticJsonDocument<256> out;
+
+      // ---- rozdzielamy MANUAL / AUTO ----
+      if (strcmp(topic, topic_manual) == 0) {
+        out["temperature"][0] = temperature;  // tablica dla HMI
+        out["mode"] = "manual";
+      } else if (strcmp(topic, topic_auto) == 0) {
+        out["temperature"] = temperature;     // liczba dla InfluxDB
+        out["mode"] = "auto";
+      } else {
+        Serial.println("Unknown topic! Not publishing.");
+        http.end();
+        return;
+      }
+
+      out["unit"] = "C";
+
+      char buffer[128];
+      serializeJson(out, buffer);
+
+      client.publish(topic, buffer, true);
+
+      Serial.print("MQTT publish -> ");
+      Serial.print(topic);
+      Serial.print(" : ");
+      Serial.println(buffer);
+
+    } else {
+      Serial.println("Błąd parsowania JSON HTTP");
+    }
+  } else {
+    Serial.println("Błąd HTTP");
+  }
+
+  http.end();
+}
+
+
+// -------------------- MQTT CALLBACK --------------------
+void callback(char* topic, byte* payload, unsigned int length) {
+
+  // ----- MANUAL REQUEST -----
+  if (strcmp(topic, topic_request) == 0) {
+
+  StaticJsonDocument<64> doc;
+  DeserializationError error = deserializeJson(doc, payload, length);
+
+  if (!error && doc.containsKey("value")) {
+    int v = doc["value"][0];
+    if (v == 1 && requestArmed) {
+      manualRequest = true;
+      requestArmed = false;
+      Serial.println("MANUAL request received (numeric JSON)");
+    }
+    if (v == 0) {
+      requestArmed = true;
+    }
+  }
+  return;
+}
+
+
+
+  // ----- LED -----
+  if (strcmp(topic, topic_led) == 0) {
+    if (payload[0] == '1') {
+      digitalWrite(LED_PIN, LOW);
+      Serial.println("LED ON");
+    } else {
+      digitalWrite(LED_PIN, HIGH);
+      Serial.println("LED OFF");
+    }
+  }
+}
+
+// -------------------- MQTT CONNECT --------------------
+void reconnect() {
+  while (!client.connected()) {
+    String clientId = "ESP32_Client_" + String(random(0xffff), HEX);
+    Serial.print("Łączenie z MQTT... ");
+
+    if (client.connect(clientId.c_str())) {
+      Serial.println("OK");
+
+      client.subscribe(topic_led);
+      client.subscribe(topic_request);
+
+      // --- publish retained init so topics are visible immediately ---
+      client.publish(topic_auto,   "{\"status\":\"online\"}", true);
+      client.publish(topic_manual, "{\"status\":\"online\"}", true);
+
+    } else {
+      Serial.print("Błąd, rc=");
+      Serial.print(client.state());
+      Serial.println(" — ponawiam za 3s");
+      delay(3000);
+    }
+  }
+}
+
+// -------------------- SETUP --------------------
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LED_PIN, OUTPUT);
+  digitalWrite(LED_PIN, HIGH);
+
+  setupWiFi();
+
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
+}
+
+// -------------------- LOOP --------------------
+void loop() {
+  if (!client.connected()) reconnect();
+  client.loop();
+
+  // -------- MANUAL MODE --------
+  if (manualRequest) {
+    manualRequest = false;
+    fetchAndPublishTemperature(topic_manual);
+  }
+
+  // -------- AUTO MODE --------
+  if (millis() - lastHTTP > AUTO_INTERVAL) {
+    lastHTTP = millis();
+    fetchAndPublishTemperature(topic_auto);
+  }
+}
