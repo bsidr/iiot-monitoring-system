@@ -1,4 +1,5 @@
-# iiot-monitoring-system
+# IIoT Monitoring System
+
 Industrial IIoT monitoring system based on ESP32, MQTT and InfluxDB.
 
 ## Project Overview
@@ -17,14 +18,30 @@ The system enables:
 - MQTT
 - InfluxDB
 - HMI
-- IIoT
+- Arduino Framework
+- ArduinoJson
+- PubSubClient
 
 ## Scope of work
 - system integration,
+- MQTT communication setup,
 - data flow architecture,
 - data conversion and processing,
 - monitoring system configuration,
 - testing and validation.
 
+## Features
+- AUTO / MANUAL operating modes,
+- HTTP API integration,
+- MQTT publish / subscribe communication,
+- JSON data processing,
+- industrial monitoring logic implementation.
+
 ## Status
 Academic project / ongoing development
+
+## Documentation
+
+Additional project documentation (Polish version):
+
+- [IIoT Project Report](IIoT_Project_Report_PL.pdf)
